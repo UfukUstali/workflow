@@ -36,10 +36,12 @@ export {
   vEventId,
   vWorkflowId,
   vWorkflowStep,
+  vOnComplete,
   type EventId,
   type WorkflowId,
   type WorkflowStep,
 } from "../types.js";
+export type { RaceResult } from "./workflowContext.js";
 export type { RunOptions, WorkflowCtx } from "./workflowContext.js";
 
 export type CallbackOptions = {

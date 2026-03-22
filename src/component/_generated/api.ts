@@ -13,6 +13,7 @@ import type * as journal from "../journal.js";
 import type * as logging from "../logging.js";
 import type * as model from "../model.js";
 import type * as pool from "../pool.js";
+import type * as race from "../race.js";
 import type * as utils from "../utils.js";
 import type * as workflow from "../workflow.js";
 
@@ -29,6 +30,7 @@ const fullApi: ApiFromModules<{
   logging: typeof logging;
   model: typeof model;
   pool: typeof pool;
+  race: typeof race;
   utils: typeof utils;
   workflow: typeof workflow;
 }> = anyApi as any;

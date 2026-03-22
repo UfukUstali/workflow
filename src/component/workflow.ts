@@ -37,6 +37,7 @@ import { api, internal } from "./_generated/api.js";
 import { formatErrorWithStack } from "../shared.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { paginator } from "convex-helpers/server/pagination";
+import { consumeRaceEvents } from "./race.js";
 
 const createArgs = v.object({
   workflowName: v.string(),
@@ -171,6 +172,16 @@ function publicStep(step: JournalEntry): WorkflowStep {
         ...commonFields,
         kind: "sleep",
         workId: step.step.workId!,
+      };
+    case "race":
+      return {
+        ...commonFields,
+        kind: "race" as const,
+        events: (step.step.events ?? []).map((e) => ({
+          id: e.id as unknown as EventId,
+          name: e.name,
+        })),
+        raceWinnerEventId: step.step.raceWinnerEventId as unknown as EventId,
       };
     default:
       throw new Error(`Unknown step kind: ${(step.step as any).kind}`);
@@ -400,17 +411,27 @@ export async function completeHandler(
       .collect();
     if (inProgress.length > 0) {
       const workpool = await getWorkpool(ctx, {});
-      for (const { step } of inProgress) {
-        if (!step.kind || step.kind === "function" || step.kind === "sleep") {
-          if (step.workId) {
-            await workpool.cancel(ctx, step.workId);
+      for (const entry of inProgress) {
+        if (
+          !entry.step.kind ||
+          entry.step.kind === "function" ||
+          entry.step.kind === "sleep"
+        ) {
+          if (entry.step.workId) {
+            await workpool.cancel(ctx, entry.step.workId);
           }
-        } else if (step.kind === "workflow") {
-          if (step.workflowId) {
+        } else if (entry.step.kind === "workflow") {
+          if (entry.step.workflowId) {
             await ctx.runMutation(api.workflow.cancel, {
-              workflowId: step.workflowId,
+              workflowId: entry.step.workflowId,
             });
           }
+        } else if (entry.step.kind === "race") {
+          await consumeRaceEvents(ctx, entry);
+          entry.step.runResult = { kind: "canceled" };
+          entry.step.inProgress = false;
+          entry.step.completedAt = Date.now();
+          await ctx.db.replace("steps", entry._id, entry);
         }
       }
     }
@@ -502,6 +523,21 @@ async function deleteSteps(ctx: MutationCtx, steps: Doc<"steps">[]) {
     await ctx.db.delete(entry._id);
     if (entry.step.kind === "event" && entry.step.eventId) {
       await ctx.db.delete(entry.step.eventId);
+    } else if (entry.step.kind === "race") {
+      const raceEvents = await ctx.db
+        .query("events")
+        .withIndex("workflowId_state", (q) =>
+          q.eq("workflowId", entry.workflowId).eq("state.kind", "waiting"),
+        )
+        .filter((q) => q.eq(q.field("state.stepId"), entry._id))
+        .collect();
+      await Promise.all(
+        raceEvents.map((events) => ctx.db.delete("events", events._id)),
+      );
+      if (entry.step.timeout?.workId) {
+        const workpool = await getWorkpool(ctx, {});
+        await workpool.cancel(ctx, entry.step.timeout.workId);
+      }
     } else if (entry.step.kind === "workflow" && entry.step.workflowId) {
       const workpool = await getWorkpool(ctx, {});
       await workpool.enqueueMutation(ctx, api.workflow.cleanup, {

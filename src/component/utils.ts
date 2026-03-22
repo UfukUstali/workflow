@@ -1,10 +1,17 @@
 import { v } from "convex/values";
 import { internalMutation, type QueryCtx } from "./_generated/server.js";
 import { createLogger, DEFAULT_LOG_LEVEL, logLevel } from "./logging.js";
+import type { RunResult } from "@convex-dev/workpool";
 
 export async function getDefaultLogger(ctx: QueryCtx) {
   const config = await ctx.db.query("config").first();
   return createLogger(config?.logLevel ?? DEFAULT_LOG_LEVEL);
+}
+
+export function runResultToError(
+  result: Exclude<RunResult, { kind: "success" }>,
+) {
+  return result.kind === "failed" ? result.error : "Canceled";
 }
 
 // For now, only configure by calling from the dashboard or CLI.

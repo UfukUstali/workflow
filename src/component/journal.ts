@@ -1,5 +1,5 @@
 import { getConvexSize, v } from "convex/values";
-import { mutation, query } from "./_generated/server.js";
+import { mutation, query, type MutationCtx } from "./_generated/server.js";
 import {
   journalDocument,
   type JournalEntry,
@@ -16,11 +16,32 @@ import {
 } from "./pool.js";
 import { internal } from "./_generated/api.js";
 import { createFunctionHandle, type FunctionHandle } from "convex/server";
-import { getDefaultLogger } from "./utils.js";
+import { getDefaultLogger, runResultToError } from "./utils.js";
 import { assert } from "convex-helpers";
 import { MAX_JOURNAL_SIZE } from "../shared.js";
 import { awaitEvent } from "./event.js";
 import { createHandler } from "./workflow.js";
+import type { Doc } from "./_generated/dataModel.js";
+
+type SentEvent = Doc<"events"> & {
+  state: { kind: "sent" };
+};
+
+async function sentEventsByNames(
+  ctx: MutationCtx,
+  workflowId: Doc<"workflows">["_id"],
+  events: Array<{ name: string }>,
+) {
+  return (
+    (await ctx.db
+      .query("events")
+      .withIndex("workflowId_state", (q) =>
+        q.eq("workflowId", workflowId).eq("state.kind", "sent"),
+      )
+      .filter((q) => q.or(...events.map((e) => q.eq(q.field("name"), e.name))))
+      .collect()) as SentEvent[]
+  ).sort((a, b) => a.state.sentAt - b.state.sentAt);
+}
 
 export const load = query({
   args: {
@@ -181,6 +202,128 @@ export const startSteps = mutation({
             {},
             { context, onComplete, name, ...schedulerOptions },
           );
+        } else if (step.kind === "race") {
+          const raceId = entry._id;
+          const sent = await sentEventsByNames(ctx, workflow._id, step.events);
+
+          const eventsToWait = new Set(step.events.map((e) => e.name));
+          let eventsToConsume: SentEvent[] = [];
+          let winner: SentEvent | undefined;
+          switch (step.failure) {
+            case "discard": {
+              const toConsume = new Map<string, SentEvent>();
+              for (const s of sent) {
+                if (toConsume.has(s.name)) {
+                  continue;
+                }
+                toConsume.set(s.name, s);
+                eventsToWait.delete(s.name);
+                if (s.state.result.kind === "success") {
+                  winner = s;
+                  break;
+                }
+              }
+              eventsToConsume = Array.from(toConsume.values());
+              break;
+            }
+            case "retry": {
+              const winnerIndex = sent.findIndex(
+                (s) => s.state.result.kind === "success",
+              );
+              if (winnerIndex >= 0) {
+                winner = sent[winnerIndex];
+                eventsToConsume = sent.slice(0, winnerIndex + 1);
+              } else {
+                eventsToConsume = sent;
+              }
+              break;
+            }
+            case "fail":
+            case undefined:
+            default: {
+              if (sent.length > 0) {
+                winner = sent[0];
+                eventsToWait.delete(winner.name);
+                eventsToConsume.push(winner);
+              }
+              break;
+            }
+          }
+
+          if (eventsToWait.size === 0 || winner) {
+            if (winner) {
+              step.raceWinnerEventId = winner._id;
+              step.runResult =
+                winner.state.result.kind === "success"
+                  ? {
+                      kind: "success",
+                      returnValue: {
+                        eventName: winner.name,
+                        value: winner.state.result.returnValue,
+                      },
+                    }
+                  : {
+                      kind: "failed",
+                      error: runResultToError(winner.state.result),
+                    };
+              eventsToWait.clear();
+            } else {
+              step.runResult = {
+                kind: "failed",
+                error: "Exhausted all events",
+              };
+            }
+            entry.step.inProgress = false;
+            entry.step.completedAt = Date.now();
+            console.event("stepCompleted", {
+              workflowId: entry.workflowId,
+              workflowName: workflow.name,
+              status: entry.step.runResult!.kind,
+              stepName: entry.step.name,
+              stepNumber,
+            });
+          }
+
+          if (step.timeout && entry.step.inProgress) {
+            const workId = await workpool.enqueueMutation(
+              ctx,
+              internal.race.timeout,
+              {
+                stepId: raceId,
+                workpoolOptions: args.workpoolOptions,
+                generationNumber,
+              },
+              {
+                runAfter: step.timeout.ms,
+              },
+            );
+            step.timeout.workId = workId;
+          }
+
+          await Promise.all([
+            ...eventsToConsume.map((e) =>
+              ctx.db.patch("events", e._id, {
+                state: {
+                  kind: "consumed",
+                  stepId: raceId,
+                  sentAt: e.state.sentAt,
+                  waitingAt: Date.now(),
+                  consumedAt: Date.now(),
+                },
+              }),
+            ),
+            ...Array.from(eventsToWait.values()).map((e) =>
+              ctx.db.insert("events", {
+                workflowId: workflow._id,
+                name: e,
+                state: {
+                  kind: "waiting",
+                  waitingAt: Date.now(),
+                  stepId: raceId,
+                },
+              }),
+            ),
+          ]);
         } else {
           const context: OnCompleteContext = {
             generationNumber,

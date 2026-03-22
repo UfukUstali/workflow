@@ -12,6 +12,23 @@ import type { Validator } from "convex/values";
 import type { EventId, SchedulerOptions, WorkflowId } from "../types.js";
 import { safeFunctionName } from "./safeFunctionName.js";
 import type { StepRequest } from "./step.js";
+import { assert } from "convex-helpers";
+
+export type RaceResult<
+  T extends ReadonlyArray<{
+    name: string;
+    validator?: Validator<any, any, any>;
+  }>,
+> = {
+  [K in keyof T]: T[K] extends {
+    name: infer N extends string;
+    validator: Validator<infer V, any, any>;
+  }
+    ? { name: N; value: V }
+    : T[K] extends { name: infer N extends string }
+      ? { name: N; value: unknown }
+      : never;
+}[number];
 
 export type RunOptions = {
   /**
@@ -125,6 +142,33 @@ export type WorkflowCtx = {
    * @param opts - Optionally name the step. Default: "sleep"
    */
   sleep(duration: number, opts?: { name?: string }): Promise<void>;
+
+  /**
+   * Waits for any one of multiple events, returning the first that fires.
+   *
+   * Each event in the array must have a unique name. The workflow blocks
+   * until an event with one of the given names is sent, then returns the
+   * matched event's name and value.
+   *
+   * @param events - Array of event definitions, each with a unique `name`
+   *   and an optional `validator` to parse the event's payload.
+   * @param opts - Optional options, including a custom step `name` for
+   *   observability (defaults to `"race(name1, name2, ...)"`) and a
+   *   `timeout` in milliseconds after which the race rejects with an error.
+   */
+  raceEvents<
+    const T extends ReadonlyArray<{
+      name: string;
+      validator?: Validator<any, any, any>;
+    }>,
+  >(
+    events: T,
+    opts?: {
+      name?: string;
+      timeout?: number;
+      failure?: "fail" | "retry" | "discard";
+    },
+  ): Promise<RaceResult<T>>;
 };
 
 export type OptionalRestArgs<
@@ -196,6 +240,59 @@ export function createWorkflowCtx(
         return parse(event.validator, result);
       }
       return result as any;
+    },
+
+    raceEvents: async <
+      T extends ReadonlyArray<{
+        name: string;
+        validator?: Validator<any, any, any>;
+      }>,
+    >(
+      events: T,
+      opts?: {
+        name?: string;
+        timeout?: number;
+        failure?: "fail" | "retry" | "discard";
+      },
+    ) => {
+      assert(events.length > 0, "At least one event must be specified.");
+      assert(
+        new Set(events.map((e) => e.name)).size === events.length,
+        "All events must have unique names.",
+      );
+      assert(
+        opts?.timeout === undefined ||
+          (opts.timeout > 0 && Number.isFinite(opts.timeout)),
+        "Timeout must be a positive number.",
+      );
+      const result = await run(sender, {
+        name: opts?.name ?? `race(${events.map((e) => e.name).join(", ")})`,
+        target: {
+          kind: "race",
+          args: {
+            events: events.map((e) => ({ name: e.name })),
+            timeout: opts?.timeout,
+            failure: opts?.failure,
+          },
+        },
+        retry: undefined,
+        inline: false,
+        schedulerOptions: {},
+      });
+      const winner = events.find((e) => e.name === (result as any).eventName);
+      if (winner?.validator) {
+        return {
+          name: winner.name as RaceResult<T>["name"],
+          value: parse(
+            winner.validator,
+            (result as any).value,
+          ) as RaceResult<T>["value"],
+        } as RaceResult<T>;
+      }
+      return {
+        name: (result as any).eventName,
+        value: (result as any).value,
+      } as any;
     },
   } satisfies WorkflowCtx;
 }

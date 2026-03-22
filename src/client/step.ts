@@ -44,6 +44,14 @@ export type StepRequest = {
     | {
         kind: "sleep";
         args: Record<string, never>;
+      }
+    | {
+        kind: "race";
+        args: {
+          events: Array<{ name: string }>;
+          timeout?: number;
+          failure?: "fail" | "retry" | "discard";
+        };
       };
   retry: RetryBehavior | boolean | undefined;
   inline: boolean;
@@ -218,6 +226,19 @@ export class StepExecutor {
             step = {
               kind: "sleep" as const,
               ...commonFields,
+            };
+            break;
+          case "race":
+            step = {
+              kind: "race" as const,
+              events: target.args.events,
+              timeout:
+                target.args.timeout !== undefined
+                  ? { ms: target.args.timeout }
+                  : undefined,
+              failure: target.args.failure,
+              ...commonFields,
+              args: target.args,
             };
             break;
           default:

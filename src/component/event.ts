@@ -6,6 +6,7 @@ import { vResultValidator } from "@convex-dev/workpool";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { assert } from "convex-helpers";
 import { enqueueWorkflow, getWorkpool, workpoolOptions } from "./pool.js";
+import { runResultToError } from "./utils.js";
 
 export async function awaitEvent(
   ctx: MutationCtx,
@@ -120,16 +121,15 @@ export const send = mutation({
       ["waiting", "created"],
     );
     const { workflowId } = event;
-    const name = args.name ?? event.name;
     switch (event.state.kind) {
       case "sent": {
         throw new Error(
-          `Event already sent: ${event._id} (${name}) in workflow ${workflowId}`,
+          `Event already sent: ${event._id} (${event.name}) in workflow ${workflowId}`,
         );
       }
       case "consumed": {
         throw new Error(
-          `Event already consumed: ${event._id} (${name}) in workflow ${workflowId}`,
+          `Event already consumed: ${event._id} (${event.name}) in workflow ${workflowId}`,
         );
       }
       case "created": {
@@ -142,32 +142,112 @@ export const send = mutation({
         const step = await ctx.db.get(event.state.stepId);
         assert(
           step,
-          `Entry ${event.state.stepId} not found when sending event ${event._id} (${name}) in workflow ${workflowId}`,
+          `Entry ${event.state.stepId} not found when sending event ${event._id} (${event.name}) in workflow ${workflowId}`,
         );
-        assert(step.step.kind === "event", "Step is not an event");
-        step.step.eventId = event._id;
-        step.step.runResult = args.result;
-        step.step.inProgress = false;
-        step.step.completedAt = Date.now();
-        await ctx.db.replace(step._id, step);
-        await ctx.db.patch(event._id, {
-          state: {
-            kind: "consumed",
-            stepId: step._id,
-            waitingAt: event.state.waitingAt,
-            sentAt: Date.now(),
-            consumedAt: Date.now(),
-          },
-        });
-        const anyMoreEvents = await ctx.db
-          .query("events")
-          .withIndex("workflowId_state", (q) =>
-            q.eq("workflowId", workflowId).eq("state.kind", "waiting"),
-          )
-          .order("desc")
-          .first();
-        if (!anyMoreEvents) {
-          const workflow = await ctx.db.get(workflowId);
+        assert(
+          step.step.kind === "event" || step.step.kind === "race",
+          "Step is not an event",
+        );
+        if (step.step.kind === "event") {
+          step.step.eventId = event._id;
+          step.step.runResult = args.result;
+          step.step.inProgress = false;
+          step.step.completedAt = Date.now();
+          await ctx.db.replace(step._id, step);
+          await ctx.db.patch(event._id, {
+            state: {
+              kind: "consumed",
+              stepId: step._id,
+              waitingAt: event.state.waitingAt,
+              sentAt: Date.now(),
+              consumedAt: Date.now(),
+            },
+          });
+          const anyMoreEvents = await ctx.db
+            .query("events")
+            .withIndex("workflowId_state", (q) =>
+              q.eq("workflowId", workflowId).eq("state.kind", "waiting"),
+            )
+            .order("desc")
+            .first();
+          if (!anyMoreEvents) {
+            const workflow = await ctx.db.get(workflowId);
+            assert(workflow, `Workflow ${workflowId} not found`);
+            const workpool = await getWorkpool(ctx, args.workpoolOptions);
+            await enqueueWorkflow(ctx, workflow, workpool);
+          }
+        } else {
+          if (args.result.kind !== "success" && step.step.failure === "retry") {
+            break;
+          }
+          await ctx.db.patch("events", event._id, {
+            state: {
+              kind: "consumed",
+              stepId: step._id,
+              waitingAt: event.state.waitingAt,
+              sentAt: Date.now(),
+              consumedAt: Date.now(),
+            },
+          });
+          const losingEvents = await ctx.db
+            .query("events")
+            .withIndex("workflowId_state", (q) =>
+              q.eq("workflowId", workflowId).eq("state.kind", "waiting"),
+            )
+            .filter((q) => q.eq(q.field("state.stepId"), step._id))
+            .collect();
+          // until all events are exhausted continue waiting
+          if (
+            args.result.kind !== "success" &&
+            step.step.failure === "discard" &&
+            losingEvents.length > 0
+          ) {
+            break;
+          }
+          if (step.step.timeout?.workId) {
+            const workpool = await getWorkpool(ctx, {});
+            await workpool.cancel(ctx, step.step.timeout.workId);
+          }
+          if (args.result.kind === "success") {
+            step.step.raceWinnerEventId = event._id;
+            step.step.runResult = {
+              kind: "success",
+              returnValue: {
+                eventName: event.name,
+                value: args.result.returnValue,
+              },
+            };
+          } else {
+            switch (step.step.failure) {
+              case "discard": {
+                step.step.runResult = {
+                  kind: "failed",
+                  error: "Exhausted all events",
+                };
+                break;
+              }
+              case "retry": {
+                // IMPOSSIBLE TO REACH HERE
+                break;
+              }
+              case "fail":
+              case undefined: {
+                step.step.raceWinnerEventId = event._id;
+                step.step.runResult = {
+                  kind: "failed",
+                  error: runResultToError(args.result),
+                };
+                break;
+              }
+            }
+          }
+          step.step.inProgress = false;
+          step.step.completedAt = Date.now();
+          await ctx.db.replace("steps", step._id, step);
+          await Promise.all(
+            losingEvents.map((losing) => ctx.db.delete("events", losing._id)),
+          );
+          const workflow = await ctx.db.get("workflows", workflowId);
           assert(workflow, `Workflow ${workflowId} not found`);
           const workpool = await getWorkpool(ctx, args.workpoolOptions);
           await enqueueWorkflow(ctx, workflow, workpool);

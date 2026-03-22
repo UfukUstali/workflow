@@ -709,6 +709,108 @@ See [`example/convex/passingSignals.ts`](./example/convex/passingSignals.ts) for
 a complete example of creating events, passing their IDs around, and sending
 signals.
 
+### Racing multiple events with `step.raceEvents`
+
+Use `step.raceEvents` to wait for any one of multiple events simultaneously. The
+workflow blocks until one of the specified events fires, then returns the
+matched event's name and value. This is useful for human-in-the-loop flows where
+you want to wait for either an approval or rejection, or any first-of-many
+signal.
+
+Each event in the array must have a **unique name**. You can optionally provide
+a `validator` on each event for type-safe payload parsing.
+
+```ts
+const approvalEvent = defineEvent({
+  name: "approval",
+  validator: v.object({ proposal: v.string() }),
+});
+const rejectionEvent = defineEvent({
+  name: "rejection",
+  validator: v.object({ reason: v.string() }),
+});
+
+export const myWorkflow = workflow.define({
+  args: {},
+  returns: v.string(),
+  handler: async (step): Promise<string> => {
+    const result = await step.raceEvents([approvalEvent, rejectionEvent]);
+
+    switch (result.name) {
+      case "approval":
+        return `Approved: ${result.value.proposal}`;
+      case "rejection":
+        return `Rejected: ${result.value.reason}`;
+    }
+  },
+});
+```
+
+The return type is a discriminated union — when you narrow on `result.name`,
+`result.value` is typed according to the matching event's validator. Events
+without a validator return `unknown` for their value.
+
+You can also use plain objects with `{ name }` instead of `defineEvent`:
+
+```ts
+const result = await step.raceEvents([{ name: "go" }, { name: "stop" }]);
+if (result.name === "go") {
+  // proceed
+}
+```
+
+Send the winning event from a mutation or action as usual:
+
+```ts
+await workflow.sendEvent(ctx, {
+  ...approvalEvent,
+  workflowId,
+  value: { proposal: "A" },
+});
+```
+
+#### Timeout
+
+Pass a `timeout` (in milliseconds) to automatically fail the race if no event
+arrives in time. This is particularly useful as a runtime safety mechanism for
+workflows that use `failure: "retry"` — the retry mode will wait indefinitely
+without a timeout.
+
+```ts
+const result = await step.raceEvents(
+  [approvalEvent, rejectionEvent],
+  { timeout: 15 * 60 * 1000 }, // 15 minutes
+);
+```
+
+If the timeout fires before any event, the step throws an error (same as
+`failure: "fail"`).
+
+#### Failure modes
+
+The `failure` option controls what happens when an event is sent with an error:
+
+- **`"fail"` (default)** — The first event (success or error) wins. If it's an
+  error, the step throws in the workflow handler.
+- **`"retry"`** — Error events are ignored and the race keeps waiting. Only a
+  success event resolves the race. Use with `timeout` to avoid waiting forever.
+- **`"discard"`** — Error events are consumed and discarded. The race keeps
+  waiting for a success event from the remaining event names. If all event names
+  are exhausted by errors, the step fails with an exhaustion error.
+
+```ts
+const result = await step.raceEvents([approvalEvent, rejectionEvent], {
+  failure: "retry",
+  timeout: 60_000,
+});
+```
+
+You can also pass a custom step `name` for observability (defaults to
+`"race(name1, name2, ...)"`).
+
+See [`example/convex/raceEvents.ts`](./example/convex/raceEvents.ts) for a
+complete example.
+
 ### Running nested workflows with `step.runWorkflow`
 
 Use `step.runWorkflow` to run another workflow as a single step in the current

@@ -42,6 +42,16 @@ const stepCommonFields = {
   completedAt: v.optional(v.number()),
 };
 
+const vEventList = v.array(
+  v.object({
+    name: v.string(),
+  }),
+);
+
+const vEventTimeout = v.optional(
+  v.object({ ms: v.number(), workId: v.optional(vWorkIdValidator) }),
+);
+
 export const step = v.union(
   v.object({
     kind: v.optional(v.literal("function")),
@@ -70,16 +80,37 @@ export const step = v.union(
   v.object({
     kind: v.literal("race"),
     ...stepCommonFields,
-    events: v.array(
-      v.object({
-        name: v.string(),
-      }),
-    ),
-    timeout: v.optional(
-      v.object({ ms: v.number(), workId: v.optional(vWorkIdValidator) }),
-    ),
+    events: vEventList,
+    timeout: vEventTimeout,
     failure: v.optional(literals("fail", "retry", "discard")),
     raceWinnerEventId: v.optional(v.id("events")),
+  }),
+  v.object({
+    kind: v.literal("all"),
+    ...stepCommonFields,
+    events: vEventList,
+    timeout: vEventTimeout,
+    fulfilled: v.array(
+      v.object({
+        name: v.string(),
+        value: v.any(),
+      }),
+    ),
+  }),
+  v.object({
+    kind: v.literal("allSettled"),
+    ...stepCommonFields,
+    events: vEventList,
+    timeout: vEventTimeout,
+    settled: v.array(
+      v.object({
+        name: v.string(),
+        result: v.union(
+          v.object({ status: v.literal("fulfilled"), value: v.any() }),
+          v.object({ status: v.literal("rejected"), reason: v.string() }),
+        ),
+      }),
+    ),
   }),
 );
 export type Step = Infer<typeof step>;

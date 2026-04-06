@@ -143,6 +143,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | { kind: "canceled" };
                   startedAt: number;
                   timeout?: { ms: number; workId?: string };
+                }
+              | {
+                  args: any;
+                  argsSize: number;
+                  completedAt?: number;
+                  events: Array<{ name: string }>;
+                  fulfilled: Array<{ name: string; value: any }>;
+                  inProgress: boolean;
+                  kind: "all";
+                  name: string;
+                  runResult?:
+                    | { kind: "success"; returnValue: any }
+                    | { error: string; kind: "failed" }
+                    | { kind: "canceled" };
+                  startedAt: number;
+                  timeout?: { ms: number; workId?: string };
+                }
+              | {
+                  args: any;
+                  argsSize: number;
+                  completedAt?: number;
+                  events: Array<{ name: string }>;
+                  inProgress: boolean;
+                  kind: "allSettled";
+                  name: string;
+                  runResult?:
+                    | { kind: "success"; returnValue: any }
+                    | { error: string; kind: "failed" }
+                    | { kind: "canceled" };
+                  settled: Array<{
+                    name: string;
+                    result:
+                      | { status: "fulfilled"; value: any }
+                      | { reason: string; status: "rejected" };
+                  }>;
+                  startedAt: number;
+                  timeout?: { ms: number; workId?: string };
                 };
             stepNumber: number;
             workflowId: string;
@@ -254,6 +291,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | { kind: "canceled" };
                   startedAt: number;
                   timeout?: { ms: number; workId?: string };
+                }
+              | {
+                  args: any;
+                  argsSize: number;
+                  completedAt?: number;
+                  events: Array<{ name: string }>;
+                  fulfilled: Array<{ name: string; value: any }>;
+                  inProgress: boolean;
+                  kind: "all";
+                  name: string;
+                  runResult?:
+                    | { kind: "success"; returnValue: any }
+                    | { error: string; kind: "failed" }
+                    | { kind: "canceled" };
+                  startedAt: number;
+                  timeout?: { ms: number; workId?: string };
+                }
+              | {
+                  args: any;
+                  argsSize: number;
+                  completedAt?: number;
+                  events: Array<{ name: string }>;
+                  inProgress: boolean;
+                  kind: "allSettled";
+                  name: string;
+                  runResult?:
+                    | { kind: "success"; returnValue: any }
+                    | { error: string; kind: "failed" }
+                    | { kind: "canceled" };
+                  settled: Array<{
+                    name: string;
+                    result:
+                      | { status: "fulfilled"; value: any }
+                      | { reason: string; status: "rejected" };
+                  }>;
+                  startedAt: number;
+                  timeout?: { ms: number; workId?: string };
                 };
           }>;
           workflowId: string;
@@ -345,6 +419,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | { kind: "success"; returnValue: any }
                   | { error: string; kind: "failed" }
                   | { kind: "canceled" };
+                startedAt: number;
+                timeout?: { ms: number; workId?: string };
+              }
+            | {
+                args: any;
+                argsSize: number;
+                completedAt?: number;
+                events: Array<{ name: string }>;
+                fulfilled: Array<{ name: string; value: any }>;
+                inProgress: boolean;
+                kind: "all";
+                name: string;
+                runResult?:
+                  | { kind: "success"; returnValue: any }
+                  | { error: string; kind: "failed" }
+                  | { kind: "canceled" };
+                startedAt: number;
+                timeout?: { ms: number; workId?: string };
+              }
+            | {
+                args: any;
+                argsSize: number;
+                completedAt?: number;
+                events: Array<{ name: string }>;
+                inProgress: boolean;
+                kind: "allSettled";
+                name: string;
+                runResult?:
+                  | { kind: "success"; returnValue: any }
+                  | { error: string; kind: "failed" }
+                  | { kind: "canceled" };
+                settled: Array<{
+                  name: string;
+                  result:
+                    | { status: "fulfilled"; value: any }
+                    | { reason: string; status: "rejected" };
+                }>;
                 startedAt: number;
                 timeout?: { ms: number; workId?: string };
               };
@@ -481,6 +592,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | { kind: "canceled" };
                   startedAt: number;
                   timeout?: { ms: number; workId?: string };
+                }
+              | {
+                  args: any;
+                  argsSize: number;
+                  completedAt?: number;
+                  events: Array<{ name: string }>;
+                  fulfilled: Array<{ name: string; value: any }>;
+                  inProgress: boolean;
+                  kind: "all";
+                  name: string;
+                  runResult?:
+                    | { kind: "success"; returnValue: any }
+                    | { error: string; kind: "failed" }
+                    | { kind: "canceled" };
+                  startedAt: number;
+                  timeout?: { ms: number; workId?: string };
+                }
+              | {
+                  args: any;
+                  argsSize: number;
+                  completedAt?: number;
+                  events: Array<{ name: string }>;
+                  inProgress: boolean;
+                  kind: "allSettled";
+                  name: string;
+                  runResult?:
+                    | { kind: "success"; returnValue: any }
+                    | { error: string; kind: "failed" }
+                    | { kind: "canceled" };
+                  settled: Array<{
+                    name: string;
+                    result:
+                      | { status: "fulfilled"; value: any }
+                      | { reason: string; status: "rejected" };
+                  }>;
+                  startedAt: number;
+                  timeout?: { ms: number; workId?: string };
                 };
             stepNumber: number;
             workflowId: string;
@@ -593,7 +741,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             completedAt?: number;
             eventId?: string;
             events?: Array<{ name: string }>;
-            kind: "function" | "workflow" | "event" | "sleep" | "race";
+            kind:
+              | "function"
+              | "workflow"
+              | "event"
+              | "sleep"
+              | "race"
+              | "all"
+              | "allSettled";
             name: string;
             nestedWorkflowId?: string;
             raceWinnerEventId?: string;

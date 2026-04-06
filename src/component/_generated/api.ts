@@ -9,11 +9,11 @@
  */
 
 import type * as event from "../event.js";
+import type * as eventWait from "../eventWait.js";
 import type * as journal from "../journal.js";
 import type * as logging from "../logging.js";
 import type * as model from "../model.js";
 import type * as pool from "../pool.js";
-import type * as race from "../race.js";
 import type * as utils from "../utils.js";
 import type * as workflow from "../workflow.js";
 
@@ -26,11 +26,11 @@ import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
   event: typeof event;
+  eventWait: typeof eventWait;
   journal: typeof journal;
   logging: typeof logging;
   model: typeof model;
   pool: typeof pool;
-  race: typeof race;
   utils: typeof utils;
   workflow: typeof workflow;
 }> = anyApi as any;

@@ -287,7 +287,7 @@ export const startSteps = mutation({
           if (step.timeout && entry.step.inProgress) {
             const workId = await workpool.enqueueMutation(
               ctx,
-              internal.race.timeout,
+              internal.eventWait.timeout,
               {
                 stepId: raceId,
                 workpoolOptions: args.workpoolOptions,
@@ -320,6 +320,245 @@ export const startSteps = mutation({
                   kind: "waiting",
                   waitingAt: Date.now(),
                   stepId: raceId,
+                },
+              }),
+            ),
+          ]);
+        } else if (step.kind === "all") {
+          const sent = await sentEventsByNames(ctx, workflow._id, step.events);
+          const earliestByName = new Map<string, SentEvent>();
+          for (const sentEvent of sent) {
+            if (earliestByName.has(sentEvent.name)) {
+              continue;
+            }
+            earliestByName.set(sentEvent.name, sentEvent);
+          }
+          const earliestByNameArray = Array.from(earliestByName.values());
+          const firstErrorIndex = earliestByNameArray.findIndex(
+            (s) => !!s && s.state.result.kind !== "success",
+          );
+          const firstError =
+            firstErrorIndex >= 0
+              ? (earliestByNameArray[firstErrorIndex] as SentEvent & {
+                  state: {
+                    result: { kind: "failed" | "canceled" };
+                  };
+                })
+              : undefined;
+          let eventsToConsume;
+          if (firstError) {
+            step.runResult = {
+              kind: "failed",
+              error: runResultToError(firstError.state.result),
+            };
+            entry.step.inProgress = false;
+            entry.step.completedAt = Date.now();
+            console.event("stepCompleted", {
+              workflowId: entry.workflowId,
+              workflowName: workflow.name,
+              status: entry.step.runResult!.kind,
+              stepName: entry.step.name,
+              stepNumber,
+            });
+            eventsToConsume = new Map(
+              earliestByNameArray
+                .slice(0, firstErrorIndex + 1)
+                .map((s) => [s.name, s]),
+            );
+          } else {
+            eventsToConsume = earliestByName;
+          }
+
+          step.fulfilled = step.events
+            .map((eventSpec) => {
+              const sentEvent = eventsToConsume.get(eventSpec.name);
+              if (!sentEvent || sentEvent.state.result.kind !== "success") {
+                return null;
+              }
+              return {
+                name: eventSpec.name,
+                value: sentEvent.state.result.returnValue,
+              };
+            })
+            .filter((item) => item !== null);
+
+          const fulfilledByName = new Map(
+            step.fulfilled.map((item) => [item.name, item.value]),
+          );
+
+          let eventsToWait = step.events.filter(
+            (e) => !eventsToConsume.has(e.name),
+          );
+
+          if (eventsToWait.length === 0 && !step.runResult) {
+            step.runResult = {
+              kind: "success",
+              returnValue: step.events.map((expected) => {
+                assert(
+                  fulfilledByName.has(expected.name),
+                  `Missing fulfilled event ${expected.name}`,
+                );
+                return fulfilledByName.get(expected.name);
+              }),
+            };
+            entry.step.inProgress = false;
+            entry.step.completedAt = Date.now();
+            console.event("stepCompleted", {
+              workflowId: entry.workflowId,
+              workflowName: workflow.name,
+              status: entry.step.runResult!.kind,
+              stepName: entry.step.name,
+              stepNumber,
+            });
+          }
+
+          if (!entry.step.inProgress) {
+            eventsToWait = [];
+          }
+
+          if (step.timeout && entry.step.inProgress) {
+            const workId = await workpool.enqueueMutation(
+              ctx,
+              internal.eventWait.timeout,
+              {
+                stepId,
+                workpoolOptions: args.workpoolOptions,
+                generationNumber,
+              },
+              {
+                runAfter: step.timeout.ms,
+              },
+            );
+            step.timeout.workId = workId;
+          }
+
+          await Promise.all([
+            ...Array.from(eventsToConsume.values()).map((sentEvent) =>
+              ctx.db.patch("events", sentEvent._id, {
+                state: {
+                  kind: "consumed",
+                  stepId,
+                  sentAt: sentEvent.state.sentAt,
+                  waitingAt: Date.now(),
+                  consumedAt: Date.now(),
+                },
+              }),
+            ),
+            ...eventsToWait.map((eventSpec) =>
+              ctx.db.insert("events", {
+                workflowId: workflow._id,
+                name: eventSpec.name,
+                state: {
+                  kind: "waiting",
+                  waitingAt: Date.now(),
+                  stepId,
+                },
+              }),
+            ),
+          ]);
+        } else if (step.kind === "allSettled") {
+          const sent = await sentEventsByNames(ctx, workflow._id, step.events);
+          const earliestByName = new Map<string, SentEvent>();
+          for (const sentEvent of sent) {
+            if (earliestByName.has(sentEvent.name)) {
+              continue;
+            }
+            earliestByName.set(sentEvent.name, sentEvent);
+          }
+
+          step.settled = step.events
+            .map((eventSpec) => {
+              const sentEvent = earliestByName.get(eventSpec.name);
+              if (!sentEvent) {
+                return null;
+              }
+              return {
+                name: eventSpec.name,
+                result:
+                  sentEvent.state.result.kind === "success"
+                    ? {
+                        status: "fulfilled" as const,
+                        value: sentEvent.state.result.returnValue,
+                      }
+                    : {
+                        status: "rejected" as const,
+                        reason: runResultToError(sentEvent.state.result),
+                      },
+              };
+            })
+            .filter((item) => item !== null);
+
+          const settledByName = new Map(
+            step.settled.map((item) => [item.name, item.result]),
+          );
+
+          let eventsToWait = step.events.filter(
+            (e) => !earliestByName.has(e.name),
+          );
+
+          if (eventsToWait.length === 0) {
+            step.runResult = {
+              kind: "success",
+              returnValue: step.events.map((expected) => {
+                const result = settledByName.get(expected.name);
+                assert(result, `Missing settled event ${expected.name}`);
+                return {
+                  name: expected.name,
+                  ...result,
+                };
+              }),
+            };
+            entry.step.inProgress = false;
+            entry.step.completedAt = Date.now();
+            console.event("stepCompleted", {
+              workflowId: entry.workflowId,
+              workflowName: workflow.name,
+              status: entry.step.runResult!.kind,
+              stepName: entry.step.name,
+              stepNumber,
+            });
+          }
+
+          if (!entry.step.inProgress) {
+            eventsToWait = [];
+          }
+
+          if (step.timeout && entry.step.inProgress) {
+            const workId = await workpool.enqueueMutation(
+              ctx,
+              internal.eventWait.timeout,
+              {
+                stepId,
+                workpoolOptions: args.workpoolOptions,
+                generationNumber,
+              },
+              {
+                runAfter: step.timeout.ms,
+              },
+            );
+            step.timeout.workId = workId;
+          }
+
+          await Promise.all([
+            ...Array.from(earliestByName.values()).map((sentEvent) =>
+              ctx.db.patch("events", sentEvent._id, {
+                state: {
+                  kind: "consumed",
+                  stepId,
+                  sentAt: sentEvent.state.sentAt,
+                  waitingAt: Date.now(),
+                  consumedAt: Date.now(),
+                },
+              }),
+            ),
+            ...eventsToWait.map((eventSpec) =>
+              ctx.db.insert("events", {
+                workflowId: workflow._id,
+                name: eventSpec.name,
+                state: {
+                  kind: "waiting",
+                  waitingAt: Date.now(),
+                  stepId,
                 },
               }),
             ),

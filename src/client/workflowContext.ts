@@ -14,12 +14,12 @@ import { safeFunctionName } from "./safeFunctionName.js";
 import type { StepRequest } from "./step.js";
 import { assert } from "convex-helpers";
 
-export type RaceResult<
-  T extends ReadonlyArray<{
-    name: string;
-    validator?: Validator<any, any, any>;
-  }>,
-> = {
+type EventSpec = {
+  name: string;
+  validator?: Validator<any, any, any>;
+};
+
+export type RaceResult<T extends ReadonlyArray<EventSpec>> = {
   [K in keyof T]: T[K] extends {
     name: infer N extends string;
     validator: Validator<infer V, any, any>;
@@ -29,6 +29,31 @@ export type RaceResult<
       ? { name: N; value: unknown }
       : never;
 }[number];
+
+export type AllEventsResult<T extends ReadonlyArray<EventSpec>> = {
+  [K in keyof T]: T[K] extends {
+    validator: Validator<infer V, any, any>;
+  }
+    ? V
+    : unknown;
+};
+
+export type AllEventsSettledResult<T extends ReadonlyArray<EventSpec>> = {
+  [K in keyof T]: T[K] extends {
+    name: infer N extends string;
+    validator: Validator<infer V, any, any>;
+  }
+    ? { name: N } & (
+        | { status: "fulfilled"; value: V }
+        | { status: "rejected"; reason: string }
+      )
+    : T[K] extends { name: infer N extends string }
+      ? { name: N } & (
+          | { status: "fulfilled"; value: unknown }
+          | { status: "rejected"; reason: string }
+        )
+      : never;
+};
 
 export type RunOptions = {
   /**
@@ -156,12 +181,7 @@ export type WorkflowCtx = {
    *   observability (defaults to `"race(name1, name2, ...)"`) and a
    *   `timeout` in milliseconds after which the race rejects with an error.
    */
-  raceEvents<
-    const T extends ReadonlyArray<{
-      name: string;
-      validator?: Validator<any, any, any>;
-    }>,
-  >(
+  raceEvents<const T extends ReadonlyArray<EventSpec>>(
     events: T,
     opts?: {
       name?: string;
@@ -169,6 +189,33 @@ export type WorkflowCtx = {
       failure?: "fail" | "retry" | "discard";
     },
   ): Promise<RaceResult<T>>;
+
+  /**
+   * Waits for all events and resolves with values in input order.
+   *
+   * Behaves like Promise.all: rejects as soon as one event is failed.
+   */
+  allEvents<const T extends ReadonlyArray<EventSpec>>(
+    events: T,
+    opts?: {
+      name?: string;
+      timeout?: number;
+    },
+  ): Promise<AllEventsResult<T>>;
+
+  /**
+   * Waits for all events to settle and resolves with per-event statuses.
+   *
+   * Behaves like Promise.allSettled: always resolves with one item per
+   * event in input order.
+   */
+  allEventsSettled<const T extends ReadonlyArray<EventSpec>>(
+    events: T,
+    opts?: {
+      name?: string;
+      timeout?: number;
+    },
+  ): Promise<AllEventsSettledResult<T>>;
 };
 
 export type OptionalRestArgs<
@@ -242,12 +289,7 @@ export function createWorkflowCtx(
       return result as any;
     },
 
-    raceEvents: async <
-      T extends ReadonlyArray<{
-        name: string;
-        validator?: Validator<any, any, any>;
-      }>,
-    >(
+    raceEvents: async <T extends ReadonlyArray<EventSpec>>(
       events: T,
       opts?: {
         name?: string;
@@ -293,6 +335,91 @@ export function createWorkflowCtx(
         name: (result as any).eventName,
         value: (result as any).value,
       } as any;
+    },
+
+    allEvents: async <T extends ReadonlyArray<EventSpec>>(
+      events: T,
+      opts?: {
+        name?: string;
+        timeout?: number;
+      },
+    ) => {
+      assert(events.length > 0, "At least one event must be specified.");
+      assert(
+        new Set(events.map((e) => e.name)).size === events.length,
+        "All events must have unique names.",
+      );
+      assert(
+        opts?.timeout === undefined ||
+          (opts.timeout > 0 && Number.isFinite(opts.timeout)),
+        "Timeout must be a positive number.",
+      );
+      const result = (await run(sender, {
+        name: opts?.name ?? `all(${events.map((e) => e.name).join(", ")})`,
+        target: {
+          kind: "all",
+          args: {
+            events: events.map((e) => ({ name: e.name })),
+            timeout: opts?.timeout,
+          },
+        },
+        retry: undefined,
+        inline: false,
+        schedulerOptions: {},
+      })) as unknown[];
+      return result.map((value, i) => {
+        const validator = events[i]?.validator;
+        return validator ? parse(validator, value) : value;
+      }) as AllEventsResult<T>;
+    },
+
+    allEventsSettled: async <T extends ReadonlyArray<EventSpec>>(
+      events: T,
+      opts?: {
+        name?: string;
+        timeout?: number;
+      },
+    ) => {
+      assert(events.length > 0, "At least one event must be specified.");
+      assert(
+        new Set(events.map((e) => e.name)).size === events.length,
+        "All events must have unique names.",
+      );
+      assert(
+        opts?.timeout === undefined ||
+          (opts.timeout > 0 && Number.isFinite(opts.timeout)),
+        "Timeout must be a positive number.",
+      );
+      const result = (await run(sender, {
+        name:
+          opts?.name ?? `allSettled(${events.map((e) => e.name).join(", ")})`,
+        target: {
+          kind: "allSettled",
+          args: {
+            events: events.map((e) => ({ name: e.name })),
+            timeout: opts?.timeout,
+          },
+        },
+        retry: undefined,
+        inline: false,
+        schedulerOptions: {},
+      })) as Array<
+        | { status: "fulfilled"; value: unknown; name: string }
+        | { status: "rejected"; reason: string; name: string }
+      >;
+      return result.map((item, i) => {
+        if (item.status === "rejected") {
+          return item;
+        }
+        const validator = events[i]?.validator;
+        if (!validator) {
+          return item;
+        }
+        return {
+          ...item,
+          value: parse(validator, item.value),
+        };
+      }) as AllEventsSettledResult<T>;
     },
   } satisfies WorkflowCtx;
 }

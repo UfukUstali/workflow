@@ -63,6 +63,14 @@ export type WorkflowStep = {
       events: Array<{ name: string }>;
       raceWinnerEventId?: EventId;
     }
+  | {
+      kind: "all";
+      events: Array<{ name: string }>;
+    }
+  | {
+      kind: "allSettled";
+      events: Array<{ name: string }>;
+    }
 );
 
 export const vWorkflowStep = v.object({
@@ -83,6 +91,8 @@ export const vWorkflowStep = v.object({
     v.literal("event"),
     v.literal("sleep"),
     v.literal("race"),
+    v.literal("all"),
+    v.literal("allSettled"),
   ),
   workId: v.optional(vWorkIdValidator),
   nestedWorkflowId: v.optional(vWorkflowId),

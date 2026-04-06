@@ -4,6 +4,10 @@ import { assert } from "convex-helpers";
 import { enqueueWorkflow, getWorkpool, workpoolOptions } from "./pool.js";
 import { getDefaultLogger } from "./utils.js";
 
+function isSupportedStepKind(kind: string | undefined) {
+  return kind === "race" || kind === "all" || kind === "allSettled";
+}
+
 export const timeout = internalMutation({
   args: {
     stepId: v.id("steps"),
@@ -14,7 +18,10 @@ export const timeout = internalMutation({
     const console = await getDefaultLogger(ctx);
     const step = await ctx.db.get("steps", args.stepId);
     assert(step, `Step not found: ${args.stepId}`);
-    assert(step.step.kind === "race", `Step is not a race: ${args.stepId}`);
+    assert(
+      isSupportedStepKind(step.step.kind),
+      `Step is not an event wait: ${args.stepId}`,
+    );
     if (!step.step.inProgress) {
       console.error(`Step ${args.stepId} is not in progress`);
       return;
@@ -32,7 +39,8 @@ export const timeout = internalMutation({
     step.step.inProgress = false;
     step.step.completedAt = Date.now();
     await ctx.db.replace("steps", step._id, step);
-    const raceEvents = await ctx.db
+
+    const waitingEvents = await ctx.db
       .query("events")
       .withIndex("workflowId_state", (q) =>
         q.eq("workflowId", step.workflowId).eq("state.kind", "waiting"),
@@ -40,7 +48,7 @@ export const timeout = internalMutation({
       .filter((q) => q.eq(q.field("state.stepId"), args.stepId))
       .collect();
     await Promise.all(
-      raceEvents.map((event) => ctx.db.delete("events", event._id)),
+      waitingEvents.map((event) => ctx.db.delete("events", event._id)),
     );
 
     const workpool = await getWorkpool(ctx, args.workpoolOptions);

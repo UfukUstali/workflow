@@ -52,6 +52,20 @@ export type StepRequest = {
           timeout?: number;
           failure?: "fail" | "retry" | "discard";
         };
+      }
+    | {
+        kind: "all";
+        args: {
+          events: Array<{ name: string }>;
+          timeout?: number;
+        };
+      }
+    | {
+        kind: "allSettled";
+        args: {
+          events: Array<{ name: string }>;
+          timeout?: number;
+        };
       };
   retry: RetryBehavior | boolean | undefined;
   inline: boolean;
@@ -237,6 +251,32 @@ export class StepExecutor {
                   ? { ms: target.args.timeout }
                   : undefined,
               failure: target.args.failure,
+              ...commonFields,
+              args: target.args,
+            };
+            break;
+          case "all":
+            step = {
+              kind: "all" as const,
+              events: target.args.events,
+              timeout:
+                target.args.timeout !== undefined
+                  ? { ms: target.args.timeout }
+                  : undefined,
+              fulfilled: [],
+              ...commonFields,
+              args: target.args,
+            };
+            break;
+          case "allSettled":
+            step = {
+              kind: "allSettled" as const,
+              events: target.args.events,
+              timeout:
+                target.args.timeout !== undefined
+                  ? { ms: target.args.timeout }
+                  : undefined,
+              settled: [],
               ...commonFields,
               args: target.args,
             };

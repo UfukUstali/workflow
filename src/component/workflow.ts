@@ -181,6 +181,24 @@ function publicStep(step: JournalEntry): WorkflowStep {
         })),
         raceWinnerEventId: step.step.raceWinnerEventId as unknown as EventId,
       };
+    case "all":
+      return {
+        ...commonFields,
+        kind: "all" as const,
+        events: step.step.events.map((e) => ({
+          name: e.name,
+        })),
+      };
+      break;
+    case "allSettled":
+      return {
+        ...commonFields,
+        kind: "allSettled" as const,
+        events: step.step.events.map((e) => ({
+          name: e.name,
+        })),
+      };
+      break;
     default:
       throw new Error(`Unknown step kind: ${(step.step as any).kind}`);
   }
@@ -424,17 +442,18 @@ export async function completeHandler(
               workflowId: entry.step.workflowId,
             });
           }
-        } else if (entry.step.kind === "race") {
-          const raceEvents = await ctx.db
-            .query("events")
-            .withIndex("workflowId_state", (q) =>
-              q.eq("workflowId", args.workflowId).eq("state.kind", "waiting"),
-            )
-            .filter((q) => q.eq(q.field("state.stepId"), entry._id))
-            .collect();
-          await Promise.all(
-            raceEvents.map((event) => ctx.db.delete("events", event._id)),
+        } else if (
+          entry.step.kind === "race" ||
+          entry.step.kind === "all" ||
+          entry.step.kind === "allSettled"
+        ) {
+          await cleanupWaitingEvents(
+            ctx,
+            entry as Doc<"steps"> & {
+              step: { kind: "race" | "all" | "allSettled" };
+            },
           );
+
           entry.step.runResult = { kind: "canceled" };
           entry.step.inProgress = false;
           entry.step.completedAt = Date.now();
@@ -530,21 +549,17 @@ async function deleteSteps(ctx: MutationCtx, steps: Doc<"steps">[]) {
     await ctx.db.delete(entry._id);
     if (entry.step.kind === "event" && entry.step.eventId) {
       await ctx.db.delete(entry.step.eventId);
-    } else if (entry.step.kind === "race") {
-      const raceEvents = await ctx.db
-        .query("events")
-        .withIndex("workflowId_state", (q) =>
-          q.eq("workflowId", entry.workflowId).eq("state.kind", "waiting"),
-        )
-        .filter((q) => q.eq(q.field("state.stepId"), entry._id))
-        .collect();
-      await Promise.all(
-        raceEvents.map((events) => ctx.db.delete("events", events._id)),
+    } else if (
+      entry.step.kind === "race" ||
+      entry.step.kind === "all" ||
+      entry.step.kind === "allSettled"
+    ) {
+      await cleanupWaitingEvents(
+        ctx,
+        entry as Doc<"steps"> & {
+          step: { kind: "race" | "all" | "allSettled" };
+        },
       );
-      if (entry.step.timeout?.workId) {
-        const workpool = await getWorkpool(ctx, {});
-        await workpool.cancel(ctx, entry.step.timeout.workId);
-      }
     } else if (entry.step.kind === "workflow" && entry.step.workflowId) {
       const workpool = await getWorkpool(ctx, {});
       await workpool.enqueueMutation(ctx, api.workflow.cleanup, {
@@ -552,6 +567,26 @@ async function deleteSteps(ctx: MutationCtx, steps: Doc<"steps">[]) {
         force: true,
       });
     }
+  }
+}
+
+async function cleanupWaitingEvents(
+  ctx: MutationCtx,
+  entry: Doc<"steps"> & { step: { kind: "race" | "all" | "allSettled" } },
+) {
+  const waitingEvents = await ctx.db
+    .query("events")
+    .withIndex("workflowId_state", (q) =>
+      q.eq("workflowId", entry.workflowId).eq("state.kind", "waiting"),
+    )
+    .filter((q) => q.eq(q.field("state.stepId"), entry._id))
+    .collect();
+  await Promise.all(
+    waitingEvents.map((event) => ctx.db.delete("events", event._id)),
+  );
+  if (entry.step.timeout?.workId) {
+    const workpool = await getWorkpool(ctx, {});
+    await workpool.cancel(ctx, entry.step.timeout.workId);
   }
 }
 

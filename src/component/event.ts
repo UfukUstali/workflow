@@ -8,6 +8,42 @@ import { assert } from "convex-helpers";
 import { enqueueWorkflow, getWorkpool, workpoolOptions } from "./pool.js";
 import { runResultToError } from "./utils.js";
 
+async function completeEventWaitStep(
+  ctx: MutationCtx,
+  step: Doc<"steps">,
+  workflowId: Id<"workflows">,
+  options?: Parameters<typeof getWorkpool>[1],
+) {
+  if (
+    (step.step.kind === "race" ||
+      step.step.kind === "all" ||
+      step.step.kind === "allSettled") &&
+    step.step.timeout?.workId
+  ) {
+    const workpool = await getWorkpool(ctx, {});
+    await workpool.cancel(ctx, step.step.timeout.workId);
+  }
+  step.step.inProgress = false;
+  step.step.completedAt = Date.now();
+  await ctx.db.replace("steps", step._id, step);
+  const waitingEvents = await ctx.db
+    .query("events")
+    .withIndex("workflowId_state", (q) =>
+      q.eq("workflowId", workflowId).eq("state.kind", "waiting"),
+    )
+    .filter((q) => q.eq(q.field("state.stepId"), step._id))
+    .collect();
+  await Promise.all(
+    waitingEvents.map((waitingEvent) =>
+      ctx.db.delete("events", waitingEvent._id),
+    ),
+  );
+  const workflow = await ctx.db.get("workflows", workflowId);
+  assert(workflow, `Workflow ${workflowId} not found`);
+  const workpool = await getWorkpool(ctx, options);
+  await enqueueWorkflow(ctx, workflow, workpool);
+}
+
 export async function awaitEvent(
   ctx: MutationCtx,
   entry: Doc<"steps">,
@@ -145,7 +181,10 @@ export const send = mutation({
           `Entry ${event.state.stepId} not found when sending event ${event._id} (${event.name}) in workflow ${workflowId}`,
         );
         assert(
-          step.step.kind === "event" || step.step.kind === "race",
+          step.step.kind === "event" ||
+            step.step.kind === "race" ||
+            step.step.kind === "all" ||
+            step.step.kind === "allSettled",
           "Step is not an event",
         );
         if (step.step.kind === "event") {
@@ -176,7 +215,7 @@ export const send = mutation({
             const workpool = await getWorkpool(ctx, args.workpoolOptions);
             await enqueueWorkflow(ctx, workflow, workpool);
           }
-        } else {
+        } else if (step.step.kind === "race") {
           if (args.result.kind !== "success" && step.step.failure === "retry") {
             break;
           }
@@ -251,6 +290,116 @@ export const send = mutation({
           assert(workflow, `Workflow ${workflowId} not found`);
           const workpool = await getWorkpool(ctx, args.workpoolOptions);
           await enqueueWorkflow(ctx, workflow, workpool);
+        } else if (step.step.kind === "all") {
+          const eventWaitStep = step.step;
+          await ctx.db.patch("events", event._id, {
+            state: {
+              kind: "consumed",
+              stepId: step._id,
+              waitingAt: event.state.waitingAt,
+              sentAt: Date.now(),
+              consumedAt: Date.now(),
+            },
+          });
+
+          if (args.result.kind !== "success") {
+            eventWaitStep.runResult = {
+              kind: "failed",
+              error: runResultToError(args.result),
+            };
+            await completeEventWaitStep(
+              ctx,
+              step,
+              workflowId,
+              args.workpoolOptions,
+            );
+            break;
+          }
+
+          eventWaitStep.fulfilled = [
+            ...eventWaitStep.fulfilled.filter((f) => f.name !== event.name),
+            {
+              name: event.name,
+              value: args.result.returnValue,
+            },
+          ];
+
+          if (eventWaitStep.fulfilled.length < eventWaitStep.events.length) {
+            await ctx.db.replace("steps", step._id, step);
+            break;
+          }
+
+          const fulfilledByName = new Map(
+            eventWaitStep.fulfilled.map((f) => [f.name, f.value]),
+          );
+          eventWaitStep.runResult = {
+            kind: "success",
+            returnValue: eventWaitStep.events.map((expected) => {
+              assert(
+                fulfilledByName.has(expected.name),
+                `Missing fulfilled event ${expected.name}`,
+              );
+              return fulfilledByName.get(expected.name);
+            }),
+          };
+          await completeEventWaitStep(
+            ctx,
+            step,
+            workflowId,
+            args.workpoolOptions,
+          );
+        } else {
+          assert(step.step.kind === "allSettled", "Step is not allSettled");
+          const eventWaitStep = step.step;
+          await ctx.db.patch("events", event._id, {
+            state: {
+              kind: "consumed",
+              stepId: step._id,
+              waitingAt: event.state.waitingAt,
+              sentAt: Date.now(),
+              consumedAt: Date.now(),
+            },
+          });
+
+          eventWaitStep.settled = [
+            ...eventWaitStep.settled.filter((s) => s.name !== event.name),
+            {
+              name: event.name,
+              result:
+                args.result.kind === "success"
+                  ? { status: "fulfilled", value: args.result.returnValue }
+                  : {
+                      status: "rejected",
+                      reason: runResultToError(args.result),
+                    },
+            },
+          ];
+
+          if (eventWaitStep.settled.length < eventWaitStep.events.length) {
+            await ctx.db.replace("steps", step._id, step);
+            break;
+          }
+
+          const settledByName = new Map(
+            eventWaitStep.settled.map((s) => [s.name, s.result]),
+          );
+          eventWaitStep.runResult = {
+            kind: "success",
+            returnValue: eventWaitStep.events.map((expected) => {
+              const settled = settledByName.get(expected.name);
+              assert(settled, `Missing settled event ${expected.name}`);
+              return {
+                name: expected.name,
+                ...settled,
+              };
+            }),
+          };
+          await completeEventWaitStep(
+            ctx,
+            step,
+            workflowId,
+            args.workpoolOptions,
+          );
         }
         break;
       }
